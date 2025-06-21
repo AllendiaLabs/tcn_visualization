@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>RONN TCN Visualizer</title>
+    <title>TCN Visualizer</title>
     <style>
         body {
             font-family: Arial, Helvetica, sans-serif;
@@ -61,7 +61,7 @@
     </style>
 </head>
 <body>
-    <h1>RONN Temporal Convolutional Network Visualizer</h1>
+    <h1>Temporal Convolutional Network Visualizer</h1>
     <form id="controls">
         <label>
             Kernel Size (k)
@@ -94,7 +94,7 @@
     <script>
         /**
          * @fileoverview Interactive visualization of the Temporal Convolutional Network (TCN)
-         *               architecture used in Randomized Overdrive Neural Networks (RONN).
+         *               architecture.
          *
          * Users can adjust the kernel size (k), dilation growth factor (d), and number of blocks (L).
          * On each update the script recomputes the receptive field for the last output sample (t = 0)
@@ -192,13 +192,26 @@
                 if (current.layer === 0) continue; // reached inputs
 
                 const prevLayer = current.layer - 1;
-                // Probabilistic sampling for non-integer dilation values
-                const rawDil = Math.pow(d, prevLayer);
-                const baseDil = Math.floor(rawDil);
-                const frac = rawDil - baseDil;
-                const dilation = baseDil + (Math.random() < frac ? 1 : 0);
+
+                /**
+                 * Sample a dilation value for a single kernel gap with probability based on the
+                 * fractional component of the ideal (potentially non-integer) dilation.
+                 *
+                 * @returns {number}  Integer spacing (\u2265 1).
+                 */
+                function sampleDil() {
+                    const raw = Math.pow(d, prevLayer);
+                    const base = Math.floor(raw);
+                    const frac = raw - base;
+                    return base + (Math.random() < frac ? 1 : 0);
+                }
+
+                let offset = 0; // cumulative spacing from current.t
                 for (let j = 0; j < k; j++) {
-                    const tPrev = current.t - j * dilation;
+                    if (j > 0) {
+                        offset += sampleDil();
+                    }
+                    const tPrev = current.t - offset;
                     const prevNode = getNode(prevLayer, tPrev, true);
                     edges.push({ from: prevNode, to: current });
                     queue.push(prevNode);
