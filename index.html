@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RONN TCN Visualizer</title>
+    <style>
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            background-color: #f5f7fa;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            margin-top: 1rem;
+            color: #333;
+        }
+
+        form {
+            margin: 1rem 0;
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        label {
+            display: flex;
+            flex-direction: column;
+            font-size: 0.9rem;
+            color: #222;
+        }
+
+        input[type="range"] {
+            width: 160px;
+        }
+
+        .value {
+            font-weight: bold;
+            margin-top: 0.2rem;
+        }
+
+        #canvasContainer {
+            width: 90vw;
+            max-width: 1200px;
+            height: 70vh;
+            background-color: white;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <h1>RONN Temporal Convolutional Network Visualizer</h1>
+    <form id="controls">
+        <label>
+            Kernel Size (k)
+            <input id="kernel" type="range" min="2" max="9" step="1" value="3" />
+            <span id="kernelVal" class="value">3</span>
+        </label>
+        <label>
+            Dilation Growth Factor (d)
+            <input id="dilation" type="range" min="1" max="4" step="0.1" value="2" />
+            <span id="dilationVal" class="value">2</span>
+        </label>
+        <label>
+            Number of Blocks (L)
+            <input id="blocks" type="range" min="1" max="10" step="1" value="4" />
+            <span id="blocksVal" class="value">4</span>
+        </label>
+        <label>
+            Delay Samples (spacing in last layer)
+            <input id="delay" type="range" min="1" max="512" step="1" value="8" />
+            <span id="delayVal" class="value">8</span>
+        </label>
+    </form>
+
+    <p id="rf" style="font-size:1rem;font-weight:bold;margin:0.5rem;">Receptive field: -- samples</p>
+
+    <div id="canvasContainer">
+        <canvas id="viz"></canvas>
+    </div>
+
+    <script>
+        /**
+         * @fileoverview Interactive visualization of the Temporal Convolutional Network (TCN)
+         *               architecture used in Randomized Overdrive Neural Networks (RONN).
+         *
+         * Users can adjust the kernel size (k), dilation growth factor (d), and number of blocks (L).
+         * On each update the script recomputes the receptive field for the last output sample (t = 0)
+         * and renders an SVG-like diagram on an HTML5 Canvas showing:
+         *   - Bottom row: input samples (circles)
+         *   - Intermediate rows: hidden layer nodes
+         *   - Top row: output sample
+         *   - Directed edges (arrows) indicating the flow of information leading to the last output
+         *
+         * All functions are documented for Doxygen using JSDoc syntax.
+         * @author AllendiaLabs
+         */
+
+        // Acquire DOM elements
+        const form = document.getElementById("controls");
+        const kernelInput = document.getElementById("kernel");
+        const dilationInput = document.getElementById("dilation");
+        const blocksInput = document.getElementById("blocks");
+        const delayInput = document.getElementById("delay");
+        const kernelVal = document.getElementById("kernelVal");
+        const dilationVal = document.getElementById("dilationVal");
+        const blocksVal = document.getElementById("blocksVal");
+        const delayVal = document.getElementById("delayVal");
+        const rfDisplay = document.getElementById("rf");
+        const canvas = document.getElementById("viz");
+        const ctx = canvas.getContext("2d");
+
+        // Resize canvas to fill parent element while accounting for device pixel ratio
+        function resizeCanvas() {
+            const rect = canvas.parentElement.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            ctx.scale(dpr, dpr);
+        }
+
+        window.addEventListener("resize", () => {
+            resizeCanvas();
+            draw();
+        });
+
+        /**
+         * Generate the graph (nodes & edges) describing the data dependencies for the
+         * last output sample at time t = 0.
+         *
+         * @param {number} k  Kernel size.
+         * @param {number} d  Dilation growth factor.
+         * @param {number} L  Number of blocks (layers).
+         * @returns {{nodes: Array<Object>, edges: Array<Object>}}
+         *          nodes: [{ layer: number, t: number }]
+         *          edges: [{ from: Object, to: Object }]
+         */
+        function generateGraph(k, d, L) {
+            /** Map from "layer:t" -> node */
+            const key = (layer, t) => `${layer}:${t}`;
+
+            /**
+             * @type {Map<string, Object>}
+             * Node cache to avoid duplicates.
+             */
+            const nodeMap = new Map();
+
+            /**
+             * Retrieve or create a node.
+             *
+             * @param {number} layer  Layer index (0 = input).
+             * @param {number} t      Time index (0 = most recent sample).
+             * @param {boolean} active Whether this node participates in the receptive field of the last output.
+             * @returns {Object}      Node reference.
+             */
+            function getNode(layer, t, active = false) {
+                const kStr = key(layer, t);
+                let node;
+                if (nodeMap.has(kStr)) {
+                    node = nodeMap.get(kStr);
+                    // Upgrade to active if necessary
+                    if (active) node.active = true;
+                } else {
+                    node = { layer, t, active };
+                    nodeMap.set(kStr, node);
+                }
+                return node;
+            }
+
+            // -----------------------
+            // 1. Traverse receptive field to mark active nodes & edges
+            // -----------------------
+            const edges = [];
+            const queue = [];
+            const outputNode = getNode(L, 0, true); // topmost output at t=0
+            queue.push(outputNode);
+
+            while (queue.length) {
+                const current = queue.shift();
+                if (current.layer === 0) continue; // reached inputs
+
+                const prevLayer = current.layer - 1;
+                // Probabilistic sampling for non-integer dilation values
+                const rawDil = Math.pow(d, prevLayer);
+                const baseDil = Math.floor(rawDil);
+                const frac = rawDil - baseDil;
+                const dilation = baseDil + (Math.random() < frac ? 1 : 0);
+                for (let j = 0; j < k; j++) {
+                    const tPrev = current.t - j * dilation;
+                    const prevNode = getNode(prevLayer, tPrev, true);
+                    edges.push({ from: prevNode, to: current });
+                    queue.push(prevNode);
+                }
+            }
+
+            // -----------------------
+            // 2. Guarantee full grid of nodes across time range [minT, 0]
+            // -----------------------
+            let minT = 0;
+            nodeMap.forEach((n) => {
+                if (n.t < minT) minT = n.t;
+            });
+
+            for (let layer = 0; layer <= L; layer++) {
+                for (let t = minT; t <= 0; t++) {
+                    getNode(layer, t, false); // create if missing, inactive
+                }
+            }
+
+            return { nodes: Array.from(nodeMap.values()), edges };
+        }
+
+        /**
+         * Render the computed graph on the canvas.
+         *
+         * @param {Array<Object>} nodes  Array returned from generateGraph().
+         * @param {Array<Object>} edges  Array of edge objects.
+         */
+        function renderGraph(nodes, edges) {
+            const margin = 40;
+            // Determine extents for layout
+            let minT = 0;
+            nodes.forEach((n) => {
+                if (n.t < minT) minT = n.t;
+            });
+            const layerCount = Math.max(...nodes.map((n) => n.layer)) + 1;
+
+            // Layout parameters
+            const width = canvas.parentElement.clientWidth;
+            const height = canvas.parentElement.clientHeight;
+            const xScale = (width - 2 * margin) / (Math.abs(minT) + 1);
+            const yScale = (height - 2 * margin) / (layerCount - 1);
+
+            /** Annotate node coordinates */
+            nodes.forEach((n) => {
+                n.x = margin + (n.t - minT) * xScale;
+                // Invert y to have layer 0 at bottom, higher layers above
+                n.y = height - margin - n.layer * yScale;
+            });
+
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.save();
+            ctx.scale(1 / (window.devicePixelRatio || 1), 1 / (window.devicePixelRatio || 1));
+
+            // Draw edges first (under nodes)
+            ctx.strokeStyle = "#666";
+            ctx.fillStyle = "#666";
+            edges.forEach((e) => {
+                drawArrow(e.from.x, e.from.y, e.to.x, e.to.y);
+            });
+
+            // Draw nodes (circles)
+            nodes.forEach((n) => {
+                ctx.beginPath();
+                // Color scheme: highlight active nodes, dim inactive ones
+                if (!n.active) {
+                    ctx.fillStyle = "#e0e0e0"; // inactive grey
+                } else if (n.layer === layerCount - 1) {
+                    ctx.fillStyle = "#007acc"; // active output nodes
+                } else if (n.layer === 0) {
+                    ctx.fillStyle = "#ff9500"; // active input nodes
+                } else {
+                    ctx.fillStyle = "#90caf9"; // active hidden nodes
+                }
+
+                ctx.strokeStyle = "#333";
+                ctx.lineWidth = 1;
+                ctx.arc(n.x, n.y, 10, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+            });
+
+            ctx.restore();
+
+            // Compute receptive field size in input samples for active nodes at layer 0
+            const inputNodes = nodes.filter((n) => n.layer === 0 && n.active);
+            let rfSize = 1;
+            if (inputNodes.length) {
+                const minT = Math.min(...inputNodes.map((n) => n.t));
+                rfSize = Math.abs(minT) + 1; // inclusive
+            }
+            rfDisplay.textContent = `Receptive field: ${rfSize} sample${rfSize !== 1 ? "s" : ""}`;
+        }
+
+        /**
+         * Draw a directed line with an arrowhead.
+         *
+         * @param {number} x1  Start x.
+         * @param {number} y1  Start y.
+         * @param {number} x2  End x.
+         * @param {number} y2  End y.
+         */
+        function drawArrow(x1, y1, x2, y2) {
+            const headLength = 8; // length of arrow head in pixels
+            const angle = Math.atan2(y2 - y1, x2 - x1);
+
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+
+            // Arrowhead
+            ctx.beginPath();
+            ctx.moveTo(x2, y2);
+            ctx.lineTo(
+                x2 - headLength * Math.cos(angle - Math.PI / 6),
+                y2 - headLength * Math.sin(angle - Math.PI / 6)
+            );
+            ctx.lineTo(
+                x2 - headLength * Math.cos(angle + Math.PI / 6),
+                y2 - headLength * Math.sin(angle + Math.PI / 6)
+            );
+            ctx.lineTo(x2, y2);
+            ctx.fill();
+        }
+
+        /**
+         * Trigger a redraw based on current form inputs.
+         */
+        function draw() {
+            const k = parseInt(kernelInput.value, 10);
+            const d = parseFloat(dilationInput.value);
+            const L = parseInt(blocksInput.value, 10);
+            const { nodes, edges } = generateGraph(k, d, L);
+            renderGraph(nodes, edges);
+        }
+
+        // Prevent form submission (page reload)
+        form.addEventListener("submit", (e) => e.preventDefault());
+
+        // Update displayed values & redraw on slider interaction
+        const inputs = [
+            [kernelInput, kernelVal],
+            [dilationInput, dilationVal],
+            [blocksInput, blocksVal],
+            [delayInput, delayVal],
+        ];
+
+        // Helper to update all spans
+        function refreshDisplays() {
+            kernelVal.textContent = kernelInput.value;
+            dilationVal.textContent = parseFloat(dilationInput.value).toFixed(1);
+            blocksVal.textContent = blocksInput.value;
+            delayVal.textContent = delayInput.value;
+        }
+
+        // Synchronize dilation and delay sliders
+        function syncSliders(changed) {
+            const L = parseInt(blocksInput.value, 10);
+            if (L < 1) return;
+
+            if (changed === dilationInput) {
+                const d = parseFloat(dilationInput.value);
+                const delay = Math.max(1, Math.round(Math.pow(d, Math.max(0, L - 1))));
+                delayInput.value = delay;
+            } else if (changed === delayInput) {
+                const delay = parseInt(delayInput.value, 10);
+                if (L > 1) {
+                    const d = Math.pow(delay, 1 / (L - 1));
+                    dilationInput.value = d.toFixed(1);
+                }
+            } else if (changed === blocksInput) {
+                // Recalculate delay based on current d
+                const d = parseFloat(dilationInput.value);
+                const delay = Math.max(1, Math.round(Math.pow(d, Math.max(0, L - 1))));
+                delayInput.value = delay;
+            }
+
+            refreshDisplays();
+        }
+
+        // Attach event handlers with synchronization
+        inputs.forEach(([slider, _]) => {
+            const handler = () => {
+                syncSliders(slider);
+                draw();
+            };
+            slider.addEventListener("input", handler);
+            slider.addEventListener("change", handler);
+        });
+
+        // Initial sync
+        syncSliders(dilationInput);
+
+        // Initialize canvas and draw
+        resizeCanvas();
+        draw();
+    </script>
+</body>
+</html> 
