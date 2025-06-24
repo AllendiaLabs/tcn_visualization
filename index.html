@@ -370,8 +370,35 @@
             delayVal.textContent = delayInput.value;
         }
 
+        /**
+         * Update the maximum selectable delay based on the maximum dilation factor and the
+         * current number of blocks. The theoretical delay required by the last TCN layer
+         * is \(d_{max}^{L-1}\). This helper guarantees that the *Delay Samples* slider
+         * always provides a large enough range so that automatically calculated delay
+         * values are never clipped by the HTML range element.
+         *
+         * @returns {number} Newly assigned maximum delay.
+         */
+        function updateDelaySliderMax() {
+            const dMax = parseFloat(dilationInput.max); // maximum allowed dilation factor
+            const L = parseInt(blocksInput.value, 10);
+
+            const newMax = Math.max(1, Math.round(Math.pow(dMax, Math.max(0, L - 1))));
+            delayInput.max = newMax;
+
+            // Clamp the current value if it exceeds the new maximum
+            if (parseInt(delayInput.value, 10) > newMax) {
+                delayInput.value = newMax;
+            }
+
+            return newMax;
+        }
+
         // Synchronize dilation and delay sliders
         function syncSliders(changed) {
+            // Make sure the delay slider range is large enough for the current L
+            updateDelaySliderMax();
+
             const L = parseInt(blocksInput.value, 10);
             if (L < 1) return;
 
@@ -406,6 +433,7 @@
         });
 
         // Initial sync
+        updateDelaySliderMax();
         syncSliders(dilationInput);
 
         // Initialize canvas and draw
